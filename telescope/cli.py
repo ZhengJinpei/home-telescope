@@ -6,7 +6,9 @@ import argparse
 import sys
 from datetime import date, datetime
 
-from . import astro, optics
+from pathlib import Path
+
+from . import astro, build, optics
 from .events import Event, find_events, highlights
 from .catalog import ALL_TARGETS, find
 from .mount import AltAzMount, SimulatedDriver, UnsafeTarget
@@ -72,6 +74,61 @@ def cmd_optics(args) -> None:
         print(f"  {cv.arcsec_per_pixel:.2f} 角秒/像素，画面 {cv.fov_width_deg:.2f}° × {cv.fov_height_deg:.2f}°")
         print("  " + ("能拍下整个月亮" if cv.moon_fits else "拍不下整个月亮"))
         print(f"  {cv.sampling}")
+
+
+def cmd_build(args) -> None:
+    spec = build.NewtonianSpec(
+        aperture_mm=args.aperture, focal_length_mm=args.focal, mirror_thickness_mm=args.thickness,
+        tube_od_mm=args.tube_od, tube_wall_mm=args.tube_wall,
+        focuser_height_mm=args.focuser_height, focuser_travel_mm=args.focuser_travel,
+        cell_depth_mm=build.cell_depth(args.plywood),
+    )
+    n = build.design_newtonian(spec)
+    dob = build.design_dobsonian(n, args.plywood)
+    scope = n.telescope
+    print(f"牛顿反射镜 {spec.aperture_mm:g} mm f/{scope.focal_ratio:.1f}（焦距 {spec.focal_length_mm:g} mm）")
+    print(f"  看得见 {scope.limiting_magnitude:.1f} 等星，分辨率 {scope.dawes_limit_arcsec:.2f} 角秒，"
+          f"最高有效倍率约 {scope.max_useful_magnification:.0f} 倍")
+
+    print("\n镜筒（位置都从镜筒尾端量起）")
+    print(f"  镜筒：外径 {spec.tube_od_mm:g} mm，切成 {n.tube_length:.0f} mm 长")
+    print(f"  主镜镜面：距尾端 {n.mirror_face_pos:.0f} mm（主镜座占 {spec.cell_depth_mm:g} mm，镜厚 {spec.mirror_thickness_mm:g} mm）")
+    print(f"  调焦座开孔中心：距尾端 {n.focuser_pos:.0f} mm")
+    print(f"  副镜：短轴 {n.secondary_minor_axis:g} mm（至少需要 {n.secondary_min_needed:.1f} mm），"
+          f"挡光 {n.obstruction:.0%}，中心对准开孔中心，再往主镜方向、背离调焦座方向各偏 {n.secondary_offset:.1f} mm")
+    print(f"  100% 照明视场：直径 {n.fully_illuminated_mm:.1f} mm（树莓派 HQ 相机对角线 7.9 mm）")
+    print(f"  焦点：调焦座收到底时在抽筒顶端外 {n.focal_plane_above_drawtube:.1f} mm")
+    print(f"    目镜对焦时抽筒伸出约 {n.eyepiece_racked_out[0]:.0f}–{n.eyepiece_racked_out[1]:.0f} mm，"
+          f"相机伸出约 {n.camera_racked_out:.0f} mm（行程 {spec.focuser_travel_mm:g} mm）")
+    print(f"  重量：主镜约 {n.mirror_kg:.1f} kg，镜筒总重约 {n.total_kg:.1f} kg，重心距尾端 {n.balance_pos:.0f} mm")
+    for w in n.warnings:
+        print(f"  ⚠ {w}")
+
+    print(f"\n多布森底座（{args.plywood:g} mm 多层板）")
+    print(f"  侧轴承圆盘直径 {2 * dob.bearing_radius:.0f} mm，转轴离摇臂箱底板 {dob.pivot_height:.0f} mm")
+    print(f"  地板上的三块铁氟龙垫片离中心 {dob.az_pad_radius:.0f} mm（图纸上有定位孔）")
+    print(f"  托架中心对准镜筒重心（距尾端 {n.balance_pos:.0f} mm），装相机后往前后滑动重新调平衡")
+    print(f"  目镜高度：指向天顶时离地约 {dob.eyepiece_height_zenith / 10:.0f} cm，"
+          f"指向地平线时约 {dob.eyepiece_height_horizon / 10:.0f} cm")
+    if dob.eyepiece_height_zenith > 1100:
+        print("  小朋友看天顶附近的目标需要一个踏脚凳")
+    print(f"  以后装电机（GT2 同步带 + 20 齿轮 + 16 细分）：高度轴 {dob.alt_steps_per_rev} 步/圈"
+          f"（{1296000 / dob.alt_steps_per_rev:.0f} 角秒/步），方位轴 {dob.az_steps_per_rev} 步/圈"
+          f"（{1296000 / dob.az_steps_per_rev:.0f} 角秒/步）")
+
+    parts = build.cut_parts(n, dob)
+    print("\n切割清单：")
+    for p in parts:
+        print(f"  {p.name} × {p.count}：{p.width:.0f} × {p.height:.0f} mm  {p.note}")
+    if args.out:
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        stem = f"telescope_{spec.aperture_mm:g}mm"
+        build.write_dxf(parts, out / f"{stem}.dxf")
+        build.write_svg(parts, out / f"{stem}.svg", args.plywood)
+        print(f"\n图纸已保存：{out / stem}.dxf（发给 CNC 切割店）和 .svg（用浏览器打开预览）")
+    else:
+        print("\n加上 --out 文件夹 可以生成切割图纸")
 
 
 def cmd_tonight(args) -> None:
@@ -192,6 +249,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--barlow", type=float, default=1.0, help="巴洛镜倍数")
     sp.add_argument("--camera", choices=["hq", "v3"], help="树莓派相机：hq 或 v3")
     sp.set_defaults(func=cmd_optics)
+
+    sp = sub.add_parser("build", help="自己做望远镜：算出镜筒和底座尺寸，生成切割图纸")
+    sp.add_argument("--aperture", type=float, default=150, help="主镜口径 mm，默认 150")
+    sp.add_argument("--focal", type=float, default=1200, help="主镜焦距 mm，默认 1200")
+    sp.add_argument("--thickness", type=float, default=25, help="主镜厚度 mm，默认 25")
+    sp.add_argument("--tube-od", type=float, default=200, help="镜筒外径 mm，默认 200（PVC 排水管）")
+    sp.add_argument("--tube-wall", type=float, default=3.9, help="镜筒壁厚 mm，默认 3.9")
+    sp.add_argument("--focuser-height", type=float, default=55, help="调焦座收到底时的高度 mm")
+    sp.add_argument("--focuser-travel", type=float, default=35, help="调焦行程 mm")
+    sp.add_argument("--plywood", type=float, default=18, help="多层板厚度 mm，默认 18")
+    sp.add_argument("--out", help="把切割图纸（DXF + SVG）保存到这个文件夹")
+    sp.set_defaults(func=cmd_build)
 
     sp = sub.add_parser("tonight", help="今晚看什么")
     add_place(sp)
