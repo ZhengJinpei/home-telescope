@@ -1,6 +1,6 @@
 [project]
 name = "home-telescope"
-version = "0.1.0"
+version = "0.2.0"
 description = "家庭智能望远镜：光学计算、今晚星空、自动寻星"
 readme = "README.md"
 requires-python = ">=3.10"

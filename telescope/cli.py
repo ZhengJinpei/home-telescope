@@ -7,11 +7,14 @@ import sys
 from datetime import date, datetime
 
 from . import astro, optics
+from .events import Event, find_events, highlights
 from .catalog import ALL_TARGETS, find
 from .mount import AltAzMount, SimulatedDriver, UnsafeTarget
 from .sky import CITIES, Observer, locate, observer_for_city, plan_tonight
 
 STARS = "★★★"
+WEEKDAYS = "一二三四五六日"
+TAGS = {1: "", 2: "【推荐】", 3: "【不要错过】"}
 
 
 def _observer(args) -> Observer:
@@ -35,6 +38,10 @@ def _scope(args) -> optics.Telescope | None:
 
 def _hm(t: datetime | None) -> str:
     return t.strftime("%H:%M") if t else "--:--"
+
+
+def _day(t: datetime) -> str:
+    return f"{t:%m-%d} 周{WEEKDAYS[t.weekday()]}"
 
 
 def cmd_optics(args) -> None:
@@ -90,6 +97,36 @@ def cmd_tonight(args) -> None:
             print(f"      · {n}")
     if len(shown) < len(plan.items):
         print(f"\n还有 {len(plan.items) - len(shown)} 个目标，用 --top 0 查看全部")
+
+    coming = highlights(find_events(night, 7, obs))
+    if coming:
+        print("\n近 7 天值得关注：")
+        for e in coming:
+            print(f"  {_day(e.when)}  {TAGS[e.importance]}{e.title}")
+        print("  用 events 命令查看详情")
+
+
+def _print_event(e: Event) -> None:
+    hidden = "" if e.visible or "看不到" in e.title else "（本地看不到）"
+    print(f"{_day(e.when)} {e.when:%H:%M}  {TAGS[e.importance]}{e.title}{hidden}")
+    if e.view:
+        print(f"      👀 {e.view}")
+    for line in e.detail.splitlines():
+        print(f"      {line}")
+
+
+def cmd_events(args) -> None:
+    obs = _observer(args)
+    start = date.fromisoformat(args.date) if args.date else datetime.now(obs.tz).date()
+    events = find_events(start, args.days, obs)
+    shown = events if args.all else [e for e in events if e.visible]
+    print(f"{start:%Y-%m-%d} 起 {args.days} 天的天象（北纬 {obs.lat:.1f}°，东经 {obs.lon:.1f}°）\n")
+    if not shown:
+        print("这段时间本地没有能看到的天象。")
+    for e in shown:
+        _print_event(e)
+    if len(shown) < len(events):
+        print(f"\n另有 {len(events) - len(shown)} 个天象本地看不到，用 --all 查看")
 
 
 def cmd_where(args) -> None:
@@ -162,6 +199,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--date", help="日期，例如 2026-10-10，默认今天")
     sp.add_argument("--top", type=int, default=12, help="只显示最值得看的前几个，0 表示全部")
     sp.set_defaults(func=cmd_tonight)
+
+    sp = sub.add_parser("events", help="天象日历：月相、合月、冲日、流星雨、日月食")
+    add_place(sp)
+    sp.add_argument("--date", help="从哪天开始，例如 2026-10-10，默认今天")
+    sp.add_argument("--days", type=int, default=30, help="往后看多少天，默认 30")
+    sp.add_argument("--all", action="store_true", help="也列出本地看不到的天象")
+    sp.set_defaults(func=cmd_events)
 
     for name, func, help_ in (("where", cmd_where, "目标现在在哪里"), ("goto", cmd_goto, "模拟自动寻星")):
         sp = sub.add_parser(name, help=help_)
