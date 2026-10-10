@@ -11,16 +11,21 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .optics import PI_HQ_CAMERA, Telescope
+from .optics import PI_HQ_CAMERA, Camera, Telescope
 
 GLASS_DENSITY_KG_MM3 = 2.5e-6  # 普通光学玻璃 / 硼硅玻璃约 2.2–2.5 g/cm³
 # 淘宝上常见的副镜短轴尺寸（mm）
 SECONDARY_SIZES = (22, 25, 30, 35, 40, 46, 50, 58, 63, 70)
+# 常见的 2 寸延长筒长度（mm）
+EXTENSION_TUBES = (25, 35, 50, 75)
 
 # 焦点相对调焦座抽筒顶端的位置（mm，往外为正）
 EYEPIECE_FOCUS = (-10.0, 5.0)  # 大多数 1.25 寸目镜的焦面在镜身台阶附近
-# 树莓派 HQ 相机：CS 口法兰距 12.5 mm，加 C-CS 转接环和 1.25 寸 C 口接筒后约 17.5 mm
-CAMERA_FOCUS = 17.5
+EYEPIECE_KG = 0.3
+CAMERA_MARGIN_MM = 5.0  # 相机对焦时抽筒至少伸出这么多，别顶到底
+MIN_FULL_FIELD_MM = 10.0  # 目视：中心这么大的范围要 100% 亮
+MIN_CORNER_LIGHT = 0.8  # 拍照：四角至少 80% 亮，剩下的暗角拍平场就能修正
+WAVELENGTH_MM = 0.00055
 
 
 @dataclass(frozen=True)
@@ -34,8 +39,10 @@ class NewtonianSpec:
     focuser_height_mm: float = 55.0  # 调焦座收到底时，从镜筒外表面到抽筒顶端
     focuser_travel_mm: float = 35.0
     cell_depth_mm: float = 50.0  # 镜筒尾端到主镜背面；自己做的主镜座 = 2 × 板厚 + 14
-    illuminated_field_mm: float = 12.0  # 希望 100% 照明的视场直径，HQ 相机对角线 7.9 mm
-    front_kg: float = 1.1  # 调焦座、副镜和支架、寻星镜、目镜或相机
+    camera: Camera = PI_HQ_CAMERA  # 按这台相机设计焦点位置和副镜大小
+    # 指定 100% 照明的视场直径；不指定时自动选：中心至少 10 mm 全亮，相机四角至少 80% 亮
+    illuminated_field_mm: float | None = None
+    front_kg: float = 1.1  # 调焦座、副镜和支架、寻星镜、目镜（不含相机）
     cell_kg: float = 0.6
 
     def __post_init__(self):
@@ -43,60 +50,105 @@ class NewtonianSpec:
             raise ValueError("焦比小于 f/3 的主镜不适合自己做第一台")
         if self.tube_od_mm - 2 * self.tube_wall_mm < self.aperture_mm + 20:
             raise ValueError("镜筒内径至少要比主镜大 20 mm，否则会挡光")
+        if self.camera.back_focus_mm is None:
+            raise ValueError(f"{self.camera.name}的镜头拆不下来，不能直焦拍摄")
 
 
 @dataclass
 class NewtonianDesign:
     spec: NewtonianSpec
     focal_plane_above_drawtube: float  # 调焦座收到底时，焦点在抽筒顶端外多少 mm
-    eyepiece_racked_out: tuple[float, float]  # 目镜对焦时抽筒伸出的范围
+    extension_tube_mm: float  # 目镜要加的延长筒，0 表示不用
+    eyepiece_racked_out: tuple[float, float]  # 目镜对焦时抽筒伸出的范围（已算上延长筒）
     camera_racked_out: float
     secondary_to_focus: float  # 副镜中心到焦点的光程
     secondary_minor_axis: float
     secondary_min_needed: float
     secondary_offset: float
     fully_illuminated_mm: float
+    corner_illumination: float  # 相机画面四角的亮度（中心为 1）
     obstruction: float  # 按直径算
+    coma_free_mm: float  # 彗差小于艾里斑的视场直径
+    corner_coma_arcsec: float  # 相机画面四角星点被彗差拉长多少角秒
     mirror_face_pos: float  # 主镜镜面到镜筒尾端
     focuser_pos: float  # 调焦座开孔中心到镜筒尾端
     tube_length: float
     mirror_kg: float
-    total_kg: float
-    balance_pos: float  # 重心到镜筒尾端
+    total_kg: float  # 目视时
+    balance_pos: float  # 目视时重心到镜筒尾端
+    balance_camera_pos: float  # 换上相机后的重心
     warnings: list[str] = field(default_factory=list)
 
     @property
     def telescope(self) -> Telescope:
         return Telescope(self.spec.aperture_mm, self.spec.focal_length_mm)
 
+    @property
+    def balance_range(self) -> tuple[float, float]:
+        return min(self.balance_pos, self.balance_camera_pos), max(self.balance_pos, self.balance_camera_pos)
+
+
+def _overlap_fraction(r_cone: float, r_sec: float, offset: float) -> float:
+    """离轴光锥（半径 r_cone，偏心 offset）落在副镜（半径 r_sec）上的比例：两圆相交面积 / 光锥面积。"""
+    if offset >= r_cone + r_sec:
+        return 0.0
+    if offset <= abs(r_sec - r_cone):
+        return 1.0 if r_sec >= r_cone else (r_sec / r_cone) ** 2
+    a = r_cone ** 2 * math.acos((offset ** 2 + r_cone ** 2 - r_sec ** 2) / (2 * offset * r_cone))
+    b = r_sec ** 2 * math.acos((offset ** 2 + r_sec ** 2 - r_cone ** 2) / (2 * offset * r_sec))
+    c = 0.5 * math.sqrt((-offset + r_cone + r_sec) * (offset + r_cone - r_sec)
+                        * (offset - r_cone + r_sec) * (offset + r_cone + r_sec))
+    return (a + b - c) / (math.pi * r_cone ** 2)
+
 
 def design_newtonian(spec: NewtonianSpec = NewtonianSpec()) -> NewtonianDesign:
     warnings = []
     d, fl, travel = spec.aperture_mm, spec.focal_length_mm, spec.focuser_travel_mm
+    cam = spec.camera
+    f_ratio = fl / d
 
-    # 焦点放在哪：既要让相机够得着（抽筒不能缩进负数），又要让目镜不超出调焦行程
-    lo = max(CAMERA_FOCUS, EYEPIECE_FOCUS[1])
+    # 焦点放在哪：相机要够得着（抽筒不能缩进负数），目镜不能超出调焦行程
+    lo = max(cam.back_focus_mm + CAMERA_MARGIN_MM, EYEPIECE_FOCUS[1])
     hi = travel + EYEPIECE_FOCUS[0]
+    extension = 0.0
     if lo <= hi:
         focal_out = (lo + hi) / 2
     else:
+        # 单反这类后截距长的相机：按相机设计，目镜加一节延长筒
         focal_out = lo
-        warnings.append(f"调焦行程 {travel:g} mm 不够同时照顾相机和目镜，按相机设计；"
-                        "目镜对焦时加一节 1.25 寸延长筒")
-    eye_out = (focal_out - EYEPIECE_FOCUS[1], focal_out - EYEPIECE_FOCUS[0])
-    cam_out = focal_out - CAMERA_FOCUS
+        need = (focal_out - EYEPIECE_FOCUS[0] - travel, focal_out - EYEPIECE_FOCUS[1])
+        fits = [e for e in EXTENSION_TUBES if need[0] <= e <= need[1]]
+        extension = fits[0] if fits else min(EXTENSION_TUBES, key=lambda e: abs(e - sum(need) / 2))
+        if not fits:
+            warnings.append(f"找不到合适的延长筒（需要 {need[0]:.0f}–{need[1]:.0f} mm），换行程更长的调焦座")
+    eye_out = (focal_out - extension - EYEPIECE_FOCUS[1], focal_out - extension - EYEPIECE_FOCUS[0])
+    cam_out = focal_out - cam.back_focus_mm
 
     sec_to_focus = spec.tube_od_mm / 2 + spec.focuser_height_mm + focal_out
-    field_mm = spec.illuminated_field_mm
+    corner = cam.diagonal_mm / 2
+
+    def fully_lit(minor: float) -> float:
+        return (minor * fl - d * sec_to_focus) / (fl - sec_to_focus)
+
+    def corner_lit(minor: float) -> float:
+        return _overlap_fraction(d / 2 * sec_to_focus / fl, minor / 2, corner * (1 - sec_to_focus / fl))
+
+    # 经典公式：短轴 = 全亮视场 + (口径 - 全亮视场) × 副镜到焦点距离 / 焦距
+    field_mm = spec.illuminated_field_mm or MIN_FULL_FIELD_MM
     needed = field_mm + (d - field_mm) * sec_to_focus / fl
-    try:
-        minor = next(s for s in SECONDARY_SIZES if s >= needed)
-    except StopIteration:
-        raise ValueError(f"副镜要 {needed:.0f} mm 以上，太大了，换更长焦距的主镜或更矮的调焦座") from None
-    fully = (minor * fl - d * sec_to_focus) / (fl - sec_to_focus)
+    ok = [m for m in SECONDARY_SIZES if m >= needed
+          and (spec.illuminated_field_mm is not None or corner_lit(m) >= MIN_CORNER_LIGHT)]
+    if not ok:
+        raise ValueError(f"副镜要 {needed:.0f} mm 以上，太大了，换更长焦距的主镜或更矮的调焦座")
+    minor = ok[0]
+    fully, corner_light = fully_lit(minor), corner_lit(minor)
     obstruction = minor / d
     if obstruction > 0.3:
         warnings.append(f"副镜挡光 {obstruction:.0%}（按直径），看行星的反差会变差")
+
+    # 彗差：像高 h 处星点拉长 3h / (16 F²)；小于艾里斑 2.44 λ F 的范围算“没有彗差”
+    coma_free = 2 * 2.44 * WAVELENGTH_MM * 16 * f_ratio ** 3 / 3
+    corner_coma = 3 * corner / (16 * f_ratio ** 2) / fl * 206265
 
     mirror_face = spec.cell_depth_mm + spec.mirror_thickness_mm
     focuser_pos = mirror_face + fl - sec_to_focus
@@ -104,19 +156,24 @@ def design_newtonian(spec: NewtonianSpec = NewtonianSpec()) -> NewtonianDesign:
 
     mirror_kg = math.pi * (d / 2) ** 2 * spec.mirror_thickness_mm * GLASS_DENSITY_KG_MM3
     tube_kg = spec.tube_kg_per_m * tube_len / 1000
-    parts = [
+    rear = [
         (mirror_kg, spec.cell_depth_mm + spec.mirror_thickness_mm / 2),
         (spec.cell_kg, spec.cell_depth_mm / 2),
         (tube_kg, tube_len / 2),
-        (spec.front_kg, focuser_pos),
     ]
-    total = sum(m for m, _ in parts)
-    balance = sum(m * z for m, z in parts) / total
+
+    def balance(front_kg: float) -> tuple[float, float]:
+        parts = rear + [(front_kg, focuser_pos)]
+        total = sum(m for m, _ in parts)
+        return total, sum(m * z for m, z in parts) / total
+
+    total, bal = balance(spec.front_kg)
+    _, bal_cam = balance(spec.front_kg - EYEPIECE_KG + cam.mass_kg)
 
     return NewtonianDesign(
-        spec, focal_out, eye_out, cam_out, sec_to_focus, minor, needed,
-        minor / (4 * fl / d), fully, obstruction, mirror_face, focuser_pos, tube_len,
-        mirror_kg, total, balance, warnings,
+        spec, focal_out, extension, eye_out, cam_out, sec_to_focus, minor, needed,
+        minor / (4 * f_ratio), fully, corner_light, obstruction, coma_free, corner_coma,
+        mirror_face, focuser_pos, tube_len, mirror_kg, total, bal, bal_cam, warnings,
     )
 
 
@@ -169,7 +226,8 @@ def design_dobsonian(newt: NewtonianDesign, plywood_mm: float = 18.0) -> Dobsoni
     inner = cradle_w + 2 * 2
     side_w = 2 * notch + 120
     # 镜筒尾端转到最低时也要离底板 25 mm 以上
-    rear_reach = math.hypot(newt.balance_pos, od / 2)
+    # 装相机后托架会往前挪，按两种重心里离尾端最远的算
+    rear_reach = math.hypot(newt.balance_range[1], od / 2)
     pivot = 5 * math.ceil(max(rear_reach + 25, notch + 80) / 5)
     front_h = pivot - rb - 20
     floor_w = inner + 2 * t

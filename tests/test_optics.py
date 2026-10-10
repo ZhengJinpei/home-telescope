@@ -59,3 +59,10 @@ def test_camera_view():
 def test_invalid_scope():
     with pytest.raises(ValueError):
         optics.Telescope(0, 700)
+
+
+def test_canon_80d_fits_whole_moon():
+    v = optics.camera_view(optics.Telescope(200, 1200), optics.CANON_80D)
+    assert v.fov_width_deg == pytest.approx(1.06, abs=0.01)
+    assert v.moon_fits
+    assert optics.CANON_80D.diagonal_mm == pytest.approx(26.8, abs=0.1)

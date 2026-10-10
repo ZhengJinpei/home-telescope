@@ -34,11 +34,13 @@ def test_short_focuser_warns():
 def test_secondary_size(newt):
     # 经典公式：短轴 = 照明视场 + (口径 - 照明视场) × 副镜到焦点距离 / 焦距
     s = newt.spec
-    expected = s.illuminated_field_mm + (s.aperture_mm - s.illuminated_field_mm) * newt.secondary_to_focus / s.focal_length_mm
+    field_mm = build.MIN_FULL_FIELD_MM
+    expected = field_mm + (s.aperture_mm - field_mm) * newt.secondary_to_focus / s.focal_length_mm
     assert newt.secondary_min_needed == pytest.approx(expected)
     assert newt.secondary_minor_axis in build.SECONDARY_SIZES
     assert newt.secondary_minor_axis >= newt.secondary_min_needed
-    assert newt.fully_illuminated_mm >= s.illuminated_field_mm
+    assert newt.fully_illuminated_mm >= field_mm
+    assert newt.corner_illumination >= build.MIN_CORNER_LIGHT
     assert newt.obstruction < 0.3
     # f/8 的副镜偏移约 1 mm
     assert newt.secondary_offset == pytest.approx(1.1, abs=0.1)
@@ -151,3 +153,54 @@ def test_mirror_cell_fits_tube(newt):
                                   for c in p.cuts if c[0] == "circle" and c[3] in (3.5, 5.0))
     assert bolt_holes(back) == bolt_holes(front)
     assert build.cell_depth(18) == 50
+
+
+def test_dslr_design():
+    from telescope.optics import CANON_80D
+
+    spec = build.NewtonianSpec(aperture_mm=200, focal_length_mm=1200, mirror_thickness_mm=33,
+                               tube_od_mm=250, tube_wall_mm=4.9, camera=CANON_80D)
+    n = build.design_newtonian(spec)
+    # 单反后截距 55 mm 以上，焦点要比树莓派相机往外推很多；目镜靠延长筒对焦
+    assert n.focal_plane_above_drawtube > 60
+    assert build.CAMERA_MARGIN_MM <= n.camera_racked_out <= spec.focuser_travel_mm
+    assert n.extension_tube_mm in build.EXTENSION_TUBES
+    lo, hi = n.eyepiece_racked_out
+    assert 0 <= lo <= hi <= spec.focuser_travel_mm
+    # 副镜要大一号才能照亮 APS-C 画面四角
+    hq = build.design_newtonian(build.NewtonianSpec(aperture_mm=200, focal_length_mm=1200, mirror_thickness_mm=33,
+                                                    tube_od_mm=250, tube_wall_mm=4.9))
+    assert n.secondary_minor_axis > hq.secondary_minor_axis
+    assert n.corner_illumination >= build.MIN_CORNER_LIGHT
+    assert n.obstruction <= 0.3
+    # f/6 配 APS-C：四角彗差明显，中间只有约 3 mm 没有彗差
+    assert n.coma_free_mm == pytest.approx(3.1, abs=0.1)
+    assert n.corner_coma_arcsec > 10
+    # 相机比目镜重，重心往前移
+    assert n.balance_camera_pos > n.balance_pos
+    dob = build.design_dobsonian(n)
+    assert dob.pivot_height - math.hypot(n.balance_camera_pos, spec.tube_od_mm / 2) >= 25
+
+
+def test_overlap_fraction():
+    assert build._overlap_fraction(5, 10, 0) == 1.0
+    assert build._overlap_fraction(5, 10, 20) == 0.0
+    assert build._overlap_fraction(5, 5, 0) == pytest.approx(1.0)
+    half = build._overlap_fraction(5, 1000, 1000)  # 大圆边缘近似直线：一半在里面
+    assert half == pytest.approx(0.5, abs=0.01)
+
+
+def test_camera_without_removable_lens_rejected():
+    from telescope.optics import PI_CAMERA_3
+
+    with pytest.raises(ValueError):
+        build.NewtonianSpec(camera=PI_CAMERA_3)
+
+
+def test_cli_build_dslr(capsys):
+    main(["build", "--aperture", "200", "--focal", "1200", "--thickness", "33", "--tube-od", "250",
+          "--tube-wall", "4.9", "--tube-kg", "5.5", "--camera", "80d"])
+    out = capsys.readouterr().out
+    assert "50 mm 的 2 寸延长筒" in out
+    assert "彗差改正镜" in out
+    assert "80D" in out

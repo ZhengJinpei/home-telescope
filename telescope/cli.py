@@ -68,7 +68,7 @@ def cmd_optics(args) -> None:
         print(f"  {label}：约 {fl:g} mm")
 
     if args.camera:
-        cam = {"hq": optics.PI_HQ_CAMERA, "v3": optics.PI_CAMERA_3}[args.camera]
+        cam = optics.CAMERAS[args.camera]
         cv = optics.camera_view(scope, cam)
         print(f"\n接 {cam.name} 直焦拍摄：")
         print(f"  {cv.arcsec_per_pixel:.2f} 角秒/像素，画面 {cv.fov_width_deg:.2f}° × {cv.fov_height_deg:.2f}°")
@@ -79,9 +79,9 @@ def cmd_optics(args) -> None:
 def cmd_build(args) -> None:
     spec = build.NewtonianSpec(
         aperture_mm=args.aperture, focal_length_mm=args.focal, mirror_thickness_mm=args.thickness,
-        tube_od_mm=args.tube_od, tube_wall_mm=args.tube_wall,
+        tube_od_mm=args.tube_od, tube_wall_mm=args.tube_wall, tube_kg_per_m=args.tube_kg,
         focuser_height_mm=args.focuser_height, focuser_travel_mm=args.focuser_travel,
-        cell_depth_mm=build.cell_depth(args.plywood),
+        cell_depth_mm=build.cell_depth(args.plywood), camera=optics.CAMERAS[args.camera],
     )
     n = build.design_newtonian(spec)
     dob = build.design_dobsonian(n, args.plywood)
@@ -94,20 +94,28 @@ def cmd_build(args) -> None:
     print(f"  镜筒：外径 {spec.tube_od_mm:g} mm，切成 {n.tube_length:.0f} mm 长")
     print(f"  主镜镜面：距尾端 {n.mirror_face_pos:.0f} mm（主镜座占 {spec.cell_depth_mm:g} mm，镜厚 {spec.mirror_thickness_mm:g} mm）")
     print(f"  调焦座开孔中心：距尾端 {n.focuser_pos:.0f} mm")
-    print(f"  副镜：短轴 {n.secondary_minor_axis:g} mm（至少需要 {n.secondary_min_needed:.1f} mm），"
-          f"挡光 {n.obstruction:.0%}，中心对准开孔中心，再往主镜方向、背离调焦座方向各偏 {n.secondary_offset:.1f} mm")
-    print(f"  100% 照明视场：直径 {n.fully_illuminated_mm:.1f} mm（树莓派 HQ 相机对角线 7.9 mm）")
-    print(f"  焦点：调焦座收到底时在抽筒顶端外 {n.focal_plane_above_drawtube:.1f} mm")
-    print(f"    目镜对焦时抽筒伸出约 {n.eyepiece_racked_out[0]:.0f}–{n.eyepiece_racked_out[1]:.0f} mm，"
-          f"相机伸出约 {n.camera_racked_out:.0f} mm（行程 {spec.focuser_travel_mm:g} mm）")
-    print(f"  重量：主镜约 {n.mirror_kg:.1f} kg，镜筒总重约 {n.total_kg:.1f} kg，重心距尾端 {n.balance_pos:.0f} mm")
+    cam = spec.camera
+    print(f"  副镜：短轴 {n.secondary_minor_axis:g} mm，挡光 {n.obstruction:.0%}，中心对准开孔中心，"
+          f"再往主镜方向、背离调焦座方向各偏 {n.secondary_offset:.1f} mm")
+    print(f"  焦点：调焦座收到底时在抽筒顶端外 {n.focal_plane_above_drawtube:.1f} mm（按{cam.name}设计）")
+    print(f"    相机对焦时抽筒伸出约 {n.camera_racked_out:.0f} mm（调焦行程 {spec.focuser_travel_mm:g} mm）")
+    ext = f"，要先插一节 {n.extension_tube_mm:g} mm 的 2 寸延长筒" if n.extension_tube_mm else ""
+    print(f"    目镜对焦时抽筒伸出约 {n.eyepiece_racked_out[0]:.0f}–{n.eyepiece_racked_out[1]:.0f} mm{ext}")
+    print(f"  照明：中心 {n.fully_illuminated_mm:.0f} mm 范围全亮，相机画面四角亮度 {n.corner_illumination:.0%}"
+          + ("（拍平场就能修正）" if n.corner_illumination < 0.95 else ""))
+    if n.corner_coma_arcsec > 3:
+        print(f"  彗差：画面四角的星点被拉长约 {n.corner_coma_arcsec:.0f} 角秒（中间 {n.coma_free_mm:.1f} mm 范围没有彗差）。"
+              "拍月亮没问题，拍星云星团建议加彗差改正镜")
+    print(f"  重量：主镜约 {n.mirror_kg:.1f} kg，镜筒总重约 {n.total_kg:.1f} kg（目视）")
+    print(f"  重心：目视时距尾端 {n.balance_pos:.0f} mm，换上相机后 {n.balance_camera_pos:.0f} mm")
     for w in n.warnings:
         print(f"  ⚠ {w}")
 
     print(f"\n多布森底座（{args.plywood:g} mm 多层板）")
     print(f"  侧轴承圆盘直径 {2 * dob.bearing_radius:.0f} mm，转轴离摇臂箱底板 {dob.pivot_height:.0f} mm")
     print(f"  地板上的三块铁氟龙垫片离中心 {dob.az_pad_radius:.0f} mm（图纸上有定位孔）")
-    print(f"  托架中心对准镜筒重心（距尾端 {n.balance_pos:.0f} mm），装相机后往前后滑动重新调平衡")
+    shift = abs(n.balance_camera_pos - n.balance_pos)
+    print(f"  托架中心对准镜筒重心（目视时距尾端 {n.balance_pos:.0f} mm）；换上相机后把镜筒在托架里挪 {shift:.0f} mm")
     print(f"  目镜高度：指向天顶时离地约 {dob.eyepiece_height_zenith / 10:.0f} cm，"
           f"指向地平线时约 {dob.eyepiece_height_horizon / 10:.0f} cm")
     if dob.eyepiece_height_zenith > 1100:
@@ -247,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--eyepiece", type=float, nargs="*", default=[], help="目镜焦距 mm，可写多个")
     sp.add_argument("--afov", type=float, default=52.0, help="目镜视场角，默认 52°")
     sp.add_argument("--barlow", type=float, default=1.0, help="巴洛镜倍数")
-    sp.add_argument("--camera", choices=["hq", "v3"], help="树莓派相机：hq 或 v3")
+    sp.add_argument("--camera", choices=list(optics.CAMERAS), help="相机：hq（树莓派 HQ）、v3（树莓派相机 3）、80d（佳能 80D）")
     sp.set_defaults(func=cmd_optics)
 
     sp = sub.add_parser("build", help="自己做望远镜：算出镜筒和底座尺寸，生成切割图纸")
@@ -256,9 +264,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--thickness", type=float, default=25, help="主镜厚度 mm，默认 25")
     sp.add_argument("--tube-od", type=float, default=200, help="镜筒外径 mm，默认 200（PVC 排水管）")
     sp.add_argument("--tube-wall", type=float, default=3.9, help="镜筒壁厚 mm，默认 3.9")
+    sp.add_argument("--tube-kg", type=float, default=3.5, help="镜筒每米重量 kg，默认 3.5（200 mm PVC 管）")
     sp.add_argument("--focuser-height", type=float, default=55, help="调焦座收到底时的高度 mm")
     sp.add_argument("--focuser-travel", type=float, default=35, help="调焦行程 mm")
     sp.add_argument("--plywood", type=float, default=18, help="多层板厚度 mm，默认 18")
+    sp.add_argument("--camera", choices=["hq", "80d"], default="hq",
+                    help="按哪台相机设计焦点和副镜：hq（树莓派 HQ，默认）或 80d（佳能 80D 单反）")
     sp.add_argument("--out", help="把切割图纸（DXF + SVG）保存到这个文件夹")
     sp.set_defaults(func=cmd_build)
 
