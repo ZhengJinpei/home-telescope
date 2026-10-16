@@ -44,3 +44,21 @@ def test_unknown_target(capsys):
 def test_list(capsys):
     out = run(capsys, "list")
     assert "行星" in out and "星云" in out
+
+
+def test_events(capsys):
+    out = run(capsys, "events", "--date", "2026-03-01", "--days", "10")
+    assert "月全食" in out
+    assert "月掩轩辕十四" in out
+    assert "【不要错过】" in out
+
+
+def test_events_all_shows_invisible(capsys):
+    out = run(capsys, "events", "--date", "2026-08-27", "--days", "3", "--all")
+    assert "月偏食" in out and "本地看不到" in out
+
+
+def test_tonight_shows_coming_events(capsys):
+    out = run(capsys, "tonight", "--date", "2026-03-01", "--top", "3")
+    assert "近 7 天值得关注" in out
+    assert "月全食" in out

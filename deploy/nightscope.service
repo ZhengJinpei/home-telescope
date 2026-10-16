@@ -1,0 +1,16 @@
+# 开机自动运行夜视望远镜。安装：sudo bash deploy/setup-pi.sh
+# 如果你的用户名不是 pi，把下面三处 pi 改成你的用户名。
+[Unit]
+Description=家用夜视望远镜
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/home-telescope
+ExecStart=/usr/bin/python3 -m nightscope run --media /home/pi/nightscope
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

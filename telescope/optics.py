@@ -106,11 +106,23 @@ class Camera:
     pixel_um: float
     width_mm: float
     height_mm: float
+    # 插进调焦座后，传感器比抽筒顶端高出多少 mm（直焦拍摄时焦点要落在这里）。None 表示镜头拆不下来
+    back_focus_mm: float | None = None
+    mass_kg: float = 0.0  # 连转接件
+
+    @property
+    def diagonal_mm(self) -> float:
+        return math.hypot(self.width_mm, self.height_mm)
 
 
-# 常见的树莓派相机
-PI_HQ_CAMERA = Camera("树莓派 HQ 相机 (IMX477)", 1.55, 6.287, 4.712)
+# 树莓派 HQ 相机：CS 口法兰距 12.5 mm，加 C-CS 转接环和 1.25 寸 C 口接筒后约 17.5 mm
+PI_HQ_CAMERA = Camera("树莓派 HQ 相机 (IMX477)", 1.55, 6.287, 4.712, back_focus_mm=17.5, mass_kg=0.15)
 PI_CAMERA_3 = Camera("树莓派相机模块 3 (IMX708)", 1.40, 6.45, 3.63)
+# 佳能 EOS 80D：EF 卡口法兰距 44 mm + T 环 11 mm = T 口标准后截距 55 mm，
+# 再加 2 寸接筒台阶到 T 口约 8 mm。机身约 730 g，T 环和接筒约 120 g
+CANON_80D = Camera("佳能 EOS 80D（APS-C）", 3.72, 22.3, 14.9, back_focus_mm=63.0, mass_kg=0.85)
+
+CAMERAS = {"hq": PI_HQ_CAMERA, "v3": PI_CAMERA_3, "80d": CANON_80D}
 
 
 @dataclass
@@ -138,3 +150,19 @@ def camera_view(scope: Telescope, camera: Camera) -> CameraView:
     else:
         sampling = "采样合适"
     return CameraView(scale, w, h, sampling)
+
+
+def cone_overlap(r_cone: float, r_hole: float, offset: float) -> float:
+    """光锥（半径 r_cone，偏心 offset）有多少能穿过半径 r_hole 的圆孔：两圆相交面积 / 光锥面积。
+
+    用来算渐晕：副镜、棱镜、调焦座这些圆孔挡掉了视场边缘多少光。
+    """
+    if offset >= r_cone + r_hole:
+        return 0.0
+    if offset <= abs(r_hole - r_cone):
+        return 1.0 if r_hole >= r_cone else (r_hole / r_cone) ** 2
+    a = r_cone ** 2 * math.acos((offset ** 2 + r_cone ** 2 - r_hole ** 2) / (2 * offset * r_cone))
+    b = r_hole ** 2 * math.acos((offset ** 2 + r_hole ** 2 - r_cone ** 2) / (2 * offset * r_hole))
+    c = 0.5 * math.sqrt((-offset + r_cone + r_hole) * (offset + r_cone - r_hole)
+                        * (offset - r_cone + r_hole) * (offset + r_cone + r_hole))
+    return (a + b - c) / (math.pi * r_cone ** 2)

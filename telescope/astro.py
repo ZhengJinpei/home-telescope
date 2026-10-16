@@ -337,18 +337,48 @@ def moon_position(when: datetime) -> BodyPosition:
     return BodyPosition(eq, mag, elong, illum)
 
 
+def equatorial_to_ecliptic(ra: float, dec: float, when: datetime) -> tuple[float, float]:
+    """赤道坐标转黄道坐标 (黄经, 黄纬)，单位度，春分点取观测日期。"""
+    ecl = obliquity(when)
+    x = _cosd(ra) * _cosd(dec)
+    y = _sind(ra) * _cosd(dec)
+    z = _sind(dec)
+    lon = norm360(_atan2d(y * _cosd(ecl) + z * _sind(ecl), x))
+    lat = _asind(z * _cosd(ecl) - y * _sind(ecl))
+    return lon, lat
+
+
+def sun_longitude(when: datetime) -> float:
+    """太阳的地心黄经（度，春分点取观测日期）。"""
+    return _sun_ecliptic(_day_number(when))[0]
+
+
+def moon_age(when: datetime) -> float:
+    """月亮黄经减太阳黄经（度）：0 新月，90 上弦，180 满月，270 下弦。"""
+    moon = moon_position(when).equatorial
+    moon_lon, _ = equatorial_to_ecliptic(moon.ra, moon.dec, when)
+    return norm360(moon_lon - sun_longitude(when))
+
+
+def topocentric(eq: Equatorial, when: datetime, lat: float, lon: float) -> Equatorial:
+    """把月亮的地心坐标换成站在地面上看到的坐标（Meeus 第 40 章），distance 需为地球半径。
+
+    月亮离地球很近，北京和悉尼看到的月亮位置能差 1° 以上；算日食必须用它。
+    """
+    u = math.atan(0.99664719 * math.tan(math.radians(lat)))
+    rho_sin = 0.99664719 * math.sin(u)
+    rho_cos = math.cos(u)
+    sin_par = 1.0 / eq.distance
+    ha = local_sidereal_time(when, lon) - eq.ra
+    denom = _cosd(eq.dec) - rho_cos * sin_par * _cosd(ha)
+    d_ra = _atan2d(-rho_cos * sin_par * _sind(ha), denom)
+    dec = _atan2d((_sind(eq.dec) - rho_sin * sin_par) * _cosd(d_ra), denom)
+    return Equatorial(norm360(eq.ra + d_ra), dec, eq.distance)
+
+
 def moon_phase(when: datetime) -> tuple[str, float]:
     """返回 (月相名称, 被照亮比例)。"""
-    d = _day_number(when)
-    moon = moon_position(when).equatorial
-    sun_lon, _, _ = _sun_ecliptic(d)
-    # 月亮黄经减太阳黄经：0 新月，90 上弦，180 满月，270 下弦
-    ecl = obliquity(when)
-    mx = _cosd(moon.ra) * _cosd(moon.dec)
-    my = _sind(moon.ra) * _cosd(moon.dec)
-    mz = _sind(moon.dec)
-    moon_lon = _atan2d(my * _cosd(ecl) + mz * _sind(ecl), mx)
-    age = norm360(moon_lon - sun_lon)
+    age = moon_age(when)
     illum = (1 - _cosd(age)) / 2
     names = ["新月", "蛾眉月", "上弦月", "盈凸月", "满月", "亏凸月", "下弦月", "残月"]
     return names[int((age + 22.5) // 45) % 8], illum
