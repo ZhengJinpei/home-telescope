@@ -153,7 +153,7 @@ def cmd_mirror(args) -> None:
     print(f"  面形：抛物面（圆锥系数 K = -1），镜面中心凹深 {p.sagitta_mm:.3f} mm")
     print(f"    从最接近的球面修成抛物面，只需改动约 {p.parabolizing_nm:.0f} nm")
     print(f"  精度（{lam:g} nm）：波面 PV ≤ λ/8（合格线 λ/6），RMS ≤ λ/25，斯特列尔比 ≥ 0.9")
-    print(f"    即面形 PV ≤ λ/16。请附干涉检测报告；没有干涉仪可以附傅科检验读数")
+    print("    即面形 PV ≤ λ/16。请附干涉检测报告；没有干涉仪可以附傅科检验读数")
     print("  材料：硼硅玻璃或微晶玻璃（热胀冷缩小）；K9 也能用，出门后要多等一会儿")
     print("  背面细磨平整，侧面细磨，两面边缘倒角 0.5–1 mm × 45°")
     print("  镀膜：增强铝膜（可见光平均反射率 ≥ 94%）+ 二氧化硅保护层")
@@ -170,11 +170,11 @@ def cmd_mirror(args) -> None:
     f_min = mirror.min_focal_ratio_for_sphere(p.diameter_mm)
     print(f"  {p.diameter_mm:g} mm 的球面镜要到 f/{f_min:g}（焦距 {f_min * p.diameter_mm:.0f} mm）以上才达到衍射极限")
 
-    print(f"\n傅科检验读数（在球心检验，光源随刀口移动，等面积分 4 个带区）")
+    print("\n傅科检验读数（在球心检验，光源随刀口移动，等面积分 4 个带区）")
     for z in mirror.foucault_zones(p.diameter_mm, p.focal_length_mm):
         print(f"  {z.inner_mm:5.1f}–{z.outer_mm:5.1f} mm 带区：刀口比中心后退 {z.reading_mm:.3f} mm")
 
-    print(f"\n副镜（椭圆平面镜，45° 放置）")
+    print("\n副镜（椭圆平面镜，45° 放置）")
     print(f"  短轴 {sec.minor_axis_mm:g} mm，长轴 {sec.major_axis_mm:.1f} mm，厚度 ≥ {sec.thickness_mm:g} mm")
     print(f"  平面度：面形 PV ≤ λ/10（{lam:g} nm）")
     print("  镀膜和主镜一样；边缘倒角，背面细磨")
