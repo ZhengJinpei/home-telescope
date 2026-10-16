@@ -86,7 +86,7 @@ class IlluminatorRef:
     参照值是估计值，实测一次后改这里就能校准。
     """
 
-    power_w: float = 3.0
+    power_w: float = 3.0  # 灯珠标称功率（驱动电流按灯珠规格，3 W 灯珠约 700 mA）
     beam_deg: float = 10.0
     f_number: float = 1.4
     range_m: float = 250.0
@@ -142,7 +142,7 @@ class PowerBudget:
     pi_w: float = 2.0  # 树莓派 Zero 2 W 采集、处理、推流
     display_w: float = 0.8  # 微型 OLED 和驱动板
     wifi_w: float = 0.5  # 开热点推流到手机
-    ir_full_w: float = 3.0  # 红外灯满功率（电功率）
+    ir_full_w: float = 1.2  # 红外灯满档：3 W 灯珠驱动到 700 mA，压降约 1.7 V
     boost_efficiency: float = 0.88  # 电池升压到 5 V
     ir_driver_efficiency: float = 0.85
     battery_wh: float = 2 * 3.0 * 3.6  # 两节 3000 mAh 的 18650 并联

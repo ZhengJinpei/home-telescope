@@ -1,8 +1,32 @@
-# 家庭智能望远镜
+# 家用夜视望远镜 & 家庭天文望远镜
 
-和孩子一起看星星的小项目：先用软件告诉你**今晚看什么、它在哪、用什么目镜**，再一步步加上相机和电动支架，最后做成会自己找星星的望远镜。
+和孩子一起看远处、看夜里、看星星的小项目，分两部分：
 
-所有代码都是纯 Python 标准库，**没有望远镜也能先在电脑上玩**。
+- **🌙 家用夜视望远镜（`nightscope`）**：白天是 5–9 倍望远镜，天黑自动变成夜视仪。星光级传感器 + 红外补光，目镜里看，同时推到手机。**制作指南：[docs/NIGHTVISION.md](docs/NIGHTVISION.md)**
+- **🔭 家庭天文望远镜（`telescope`）**：今晚看什么、天象日历、光学计算、自制牛顿反射镜的尺寸和切割图纸、模拟自动寻星
+
+## 🌙 家用夜视望远镜
+
+```bash
+pip install numpy pillow
+python3 -m nightscope design            # 放大倍数、视场、红外灯能照多远、续航
+python3 -m nightscope run --simulate    # 不用硬件，浏览器打开 http://localhost:8080 试玩
+```
+
+| 功能 | 说明 |
+|---|---|
+| 自动昼夜 | 天黑 3 秒自动切到夜间：红外截止滤镜移开，可以开红外灯；天亮自动切回 |
+| 夜间画质 | 多帧降噪（按 8×8 小块判断运动，不拖影）、自动对比度、绿色 / 黑白 / 彩色三种显示 |
+| 变倍 | 1× / 2× / 4×，由相机的图像处理器裁剪，不占 CPU；倍率越高曝光越短，手持不糊 |
+| 手机同步 | 树莓派开 Wi-Fi 热点，手机浏览器看实时画面、按按钮、下载照片录像；页面全暗红色，不晃眼 |
+| 拍照录像 | 照片是目镜里看到的样子，录像用硬件 H.264 编码 |
+| 硬件 | 树莓派 Zero 2 W + IMX462 + 50 mm F1.4 镜头 + 0.39 寸 OLED 目镜 + 850 nm 红外灯 + 两节 18650，约 1000–1600 元 |
+
+真机驱动（picamera2、gpiozero、帧缓冲）已经写好，但还没在实物上验证。零件到手后按 [docs/NIGHTVISION.md](docs/NIGHTVISION.md) 的“第一次通电”逐项测试。
+
+---
+
+# 🔭 家庭天文望远镜
 
 ## 现在能做什么（v0.3）
 
@@ -144,5 +168,12 @@ pytest
 | `telescope/events.py` | 天象日历 |
 | `telescope/build.py` | 自制望远镜的尺寸计算和切割图纸 |
 | `telescope/mirror.py` | 主副镜外协参数、球面误差、傅科检验读数 |
+| `nightscope/design.py` | 夜视仪光学和电源计算 |
+| `nightscope/controller.py` | 按键、自动昼夜、红外灯、变倍、拍照录像的逻辑 |
+| `nightscope/imaging.py` | 降噪、夜间配色、对比度、十字线 |
+| `nightscope/hardware.py` | 相机、GPIO、屏幕的真机驱动和模拟版 |
+| `nightscope/server.py` | 手机网页和画面推流 |
+| `nightscope/app.py` | 主循环 |
+| `deploy/` | 树莓派安装脚本和开机自启服务 |
 | `telescope/mount.py` | 电动支架、自动寻星、太阳保护 |
 | `telescope/cli.py` | 命令行 |

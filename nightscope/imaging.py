@@ -1,7 +1,9 @@
-"""图像处理：数码变倍、多帧降噪、夜间配色、自动对比度、十字线。
+"""图像处理：多帧降噪、夜间配色、自动对比度、十字线。
 
 输入输出都是 RGB 的 numpy uint8 数组（高 × 宽 × 3）。按树莓派 Zero 2 W 的算力设计：
-只用简单的数组运算，统计量隔点采样。
+- 数码变倍交给相机的图像处理器（ISP）做，不占 CPU，见 hardware.PiCamera.set_zoom
+- 夜间先转成单色再处理，数据量少三分之二
+- 降噪用整数定点运算，配色和对比度用 256 项查找表
 """
 
 from __future__ import annotations
@@ -12,21 +14,25 @@ from .controller import NIGHT, State
 
 # 绿色夜视：模仿传统夜视仪的荧光屏颜色，人眼对绿色最敏感
 GREEN = np.array([0.35, 1.0, 0.45], dtype=np.float32)
+WHITE = np.array([1.0, 1.0, 1.0], dtype=np.float32)
 
 
-def luma(frame: np.ndarray) -> np.ndarray:
-    """RGB → 亮度（float32，0–255）。"""
-    f = frame.astype(np.float32)
-    return 0.299 * f[..., 0] + 0.587 * f[..., 1] + 0.114 * f[..., 2]
+def gray(frame: np.ndarray) -> np.ndarray:
+    """RGB → 亮度，uint8。用 (R + 2G + B) / 4 近似，只要加法和移位。"""
+    f = frame.astype(np.uint16)
+    return ((f[..., 0] + 2 * f[..., 1] + f[..., 2]) >> 2).astype(np.uint8)
 
 
 def mean_luma(frame: np.ndarray, step: int = 8) -> float:
     """画面平均亮度 0–1，隔 step 个像素取一个点。"""
-    return float(luma(frame[::step, ::step]).mean() / 255.0)
+    return float(gray(frame[::step, ::step]).mean() / 255.0)
 
 
 def digital_zoom(frame: np.ndarray, factor: float, out_size: tuple[int, int] | None = None) -> np.ndarray:
-    """从画面中间裁出 1/factor，再放大到 out_size（宽, 高）。用最近邻，快。"""
+    """软件变倍：从画面中间裁出 1/factor，再放大到 out_size（宽, 高）。用最近邻。
+
+    真机上变倍由相机 ISP 完成，这里给模拟相机和缩小推流画面用。
+    """
     h, w = frame.shape[:2]
     out_w, out_h = out_size or (w, h)
     if factor <= 1 and (out_w, out_h) == (w, h):
@@ -41,54 +47,86 @@ def digital_zoom(frame: np.ndarray, factor: float, out_size: tuple[int, int] | N
 class TemporalDenoiser:
     """多帧平均降噪：静止的地方越叠越干净，动的地方直接用新画面，不拖影。
 
-    strength 是新画面占的比例（越小越干净、越容易拖影）；
-    某个像素和平均值差超过 motion_threshold，就认为它在动。
+    用 int16 定点数（4 位小数）。每帧新画面占 1/2^shift：shift 越大越干净，也越容易拖影；
+    shift = 0 相当于不降噪。
+
+    判断“在动”按 block × block 的小块算：小块里新画面和平均画面的平均差超过 motion_threshold 级
+    就算动。噪点在小块里正负抵消（8×8 块噪声降到 1/8），真正移动的东西不会，所以夜里噪点再大也不会误判。
+    只处理单色画面（高 × 宽）。
     """
 
-    def __init__(self, strength: float = 0.3, motion_threshold: float = 40.0):
-        self.strength = strength
+    FRAC = 4
+
+    def __init__(self, shift: int = 2, motion_threshold: int = 12, block: int = 8):
+        self.shift = shift
         self.motion_threshold = motion_threshold
-        self._avg: np.ndarray | None = None
+        self.block = block
+        self._acc: np.ndarray | None = None
 
     def reset(self) -> None:
-        self._avg = None
+        self._acc = None
 
-    def process(self, frame: np.ndarray) -> np.ndarray:
-        f = frame.astype(np.float32)
-        if self._avg is None or self._avg.shape != f.shape:
-            self._avg = f
-            return frame
-        diff = np.abs(f - self._avg).max(axis=-1, keepdims=True)
-        alpha = np.where(diff > self.motion_threshold, 1.0, self.strength).astype(np.float32)
-        self._avg += alpha * (f - self._avg)
-        return self._avg.round().astype(np.uint8)
+    def _moving(self, d: np.ndarray) -> np.ndarray:
+        b = self.block
+        h, w = d.shape[:2]
+        hb, wb = h // b, w // b
+        sums = d[:hb * b, :wb * b].reshape(hb, b, wb, b).sum(axis=(1, 3), dtype=np.int32)
+        blocks = np.abs(sums) > (self.motion_threshold << self.FRAC) * b * b
+        mask = np.ones((h, w), dtype=bool)  # 边上凑不满一块的像素不降噪
+        mask[:hb * b, :wb * b].reshape(hb, b, wb, b)[:] = blocks[:, None, :, None]
+        return mask
+
+    def process(self, img: np.ndarray) -> np.ndarray:
+        x = img.astype(np.int16) << self.FRAC
+        if self._acc is None or self._acc.shape != x.shape or self.shift == 0:
+            self._acc = x
+            return img
+        d = x - self._acc
+        moving = self._moving(d)
+        self._acc += d >> self.shift
+        np.copyto(self._acc, x, where=moving)
+        return (self._acc >> self.FRAC).astype(np.uint8)
 
 
-def auto_contrast(gray: np.ndarray, low_pct: float = 1.0, high_pct: float = 99.5, step: int = 4) -> np.ndarray:
-    """把最暗的 1% 拉到黑、最亮的 0.5% 拉到白（float32，0–1）。"""
-    sample = gray[::step, ::step]
-    lo, hi = np.percentile(sample, [low_pct, high_pct])
-    span = max(float(hi - lo), 8.0)  # 太暗的画面别把噪点放大成满屏雪花
-    return np.clip((gray - lo) / span, 0.0, 1.0)
+def stretch_lut(gray_img: np.ndarray, low_pct: float = 1.0, high_pct: float = 99.5,
+                step: int = 4, lift: bool = True) -> np.ndarray:
+    """自动对比度的查找表：最暗的 1% 变黑、最亮的 0.5% 变白，返回 256 个 0–1 的值。
+
+    用直方图找百分位，比排序快得多。lift=True 时再开平方，提亮暗部。
+    """
+    hist = np.bincount(gray_img[::step, ::step].ravel(), minlength=256)
+    cdf = np.cumsum(hist) / max(hist.sum(), 1)
+    lo = int(np.searchsorted(cdf, low_pct / 100))
+    hi = int(np.searchsorted(cdf, high_pct / 100))
+    span = max(hi - lo, 8)  # 太暗的画面别把噪点放大成满屏雪花
+    v = np.clip((np.arange(256, dtype=np.float32) - lo) / span, 0.0, 1.0)
+    return np.sqrt(v) if lift else v
 
 
-def night_palette(frame: np.ndarray, palette: str) -> np.ndarray:
-    """夜间配色：green 绿色、white 黑白、color 保留彩色只拉对比度。"""
+def night_palette(frame: np.ndarray, palette: str, denoiser: TemporalDenoiser | None = None) -> np.ndarray:
+    """夜间画面：green 绿色、white 黑白（先转单色），color 保留彩色只拉对比度。"""
+    y = gray(frame)
     if palette == "color":
-        out = frame.astype(np.float32)
-        lo, hi = np.percentile(out[::4, ::4], [1.0, 99.5])
-        out = np.clip((out - lo) / max(float(hi - lo), 8.0), 0.0, 1.0)
-        return (out * 255).astype(np.uint8)
-    y = auto_contrast(luma(frame))
-    y = np.sqrt(y)  # 提亮暗部，夜里多看清一点
-    if palette == "green":
-        return (y[..., None] * GREEN * 255).astype(np.uint8)
-    return np.repeat((y * 255).astype(np.uint8)[..., None], 3, axis=-1)
+        img = frame
+        if denoiser:
+            # 只给亮度降噪，颜色用新画面：人眼对亮度噪点最敏感，计算量省三分之二
+            yd = denoiser.process(y)
+            corr = yd.astype(np.int16) - y
+            img = np.clip(frame + corr[..., None], 0, 255).astype(np.uint8)
+            y = yd
+        lut = (stretch_lut(y, lift=False) * 255).astype(np.uint8)
+        return np.take(lut, img)  # 比 lut[img] 快好几倍
+    if denoiser:
+        y = denoiser.process(y)
+    tint = GREEN if palette == "green" else WHITE
+    lut = (stretch_lut(y)[:, None] * tint * 255).astype(np.uint8)  # 256 × 3
+    return np.take(lut, y, axis=0)
 
 
-def draw_reticle(frame: np.ndarray, color: tuple[int, int, int] = (255, 60, 60), gap: int = 6, arm: int = 18) -> np.ndarray:
+def draw_reticle(frame: np.ndarray, color: tuple[int, int, int] = (255, 60, 60), gap: int = 6, arm: int = 18,
+                 inplace: bool = False) -> np.ndarray:
     """画面中心的十字线，中间留空不挡目标。"""
-    out = frame.copy()
+    out = frame if inplace else frame.copy()
     h, w = out.shape[:2]
     cx, cy = w // 2, h // 2
     out[cy, cx - gap - arm:cx - gap] = color
@@ -98,24 +136,27 @@ def draw_reticle(frame: np.ndarray, color: tuple[int, int, int] = (255, 60, 60),
     return out
 
 
+# 倍率越高手越抖，降噪要越轻，否则一动就拖影
+DENOISE_SHIFT = {1: 2, 2: 1, 4: 1}
+
+
 class Pipeline:
     """按当前状态把相机画面处理成显示和推流用的画面。"""
 
-    def __init__(self, out_size: tuple[int, int] | None = None):
-        self.out_size = out_size
+    def __init__(self):
         self.denoiser = TemporalDenoiser()
         self._last_key: tuple | None = None
 
     def process(self, frame: np.ndarray, state: State) -> np.ndarray:
-        key = (state.mode, state.zoom)
-        if key != self._last_key:  # 换模式或变倍后，旧的平均画面作废
+        key = (state.mode, state.zoom, state.palette)
+        if key != self._last_key:  # 换模式、变倍或换颜色后，旧的平均画面作废
             self.denoiser.reset()
             self._last_key = key
-        out = digital_zoom(frame, state.zoom, self.out_size)
         if state.mode == NIGHT:
-            # 倍率越高手越抖，降噪越要轻
-            self.denoiser.strength = {1: 0.3, 2: 0.45, 4: 0.6}[state.zoom]
-            out = night_palette(self.denoiser.process(out), state.palette)
+            self.denoiser.shift = DENOISE_SHIFT.get(state.zoom, 1)
+            out = night_palette(frame, state.palette, self.denoiser)
+        else:
+            out = frame.copy() if state.reticle else frame
         if state.reticle:
-            out = draw_reticle(out)
+            draw_reticle(out, inplace=True)
         return out

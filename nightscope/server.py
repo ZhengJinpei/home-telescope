@@ -12,27 +12,56 @@ import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
+
+import numpy as np
 
 BOUNDARY = "nightscope-frame"
 
 
 class Hub:
-    """主循环和网页之间传东西：最新一帧画面、当前状态、手机上按的按钮。"""
+    """主循环和网页之间传东西：最新一帧画面、当前状态、手机上按的按钮。
 
-    def __init__(self, media_dir: Path):
+    JPEG 压缩在单独的线程里做（树莓派有 4 个核），手机连上也不拖慢目镜里的画面；
+    压缩跟不上时直接跳过旧画面，只压最新的一帧。
+    """
+
+    def __init__(self, media_dir: Path, encode: Callable[[np.ndarray], bytes] | None = None):
         self.media_dir = media_dir
         self.state: dict = {}
         self._cond = threading.Condition()
         self._jpeg: bytes | None = None
         self._seq = 0
+        self._raw: np.ndarray | None = None
+        self._raw_seq = 0
         self._clients = 0
         self._actions: queue.Queue[dict] = queue.Queue()
         self.closed = False
+        if encode is not None:
+            self._encode = encode
+            threading.Thread(target=self._encode_loop, daemon=True).start()
 
     # 主循环这边
     @property
     def has_viewers(self) -> bool:
         return self._clients > 0
+
+    def submit(self, frame: np.ndarray) -> None:
+        """交一帧画面给压缩线程，马上返回。frame 之后不能再改。"""
+        with self._cond:
+            self._raw = frame
+            self._raw_seq += 1
+            self._cond.notify_all()
+
+    def _encode_loop(self) -> None:
+        done = 0
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: self.closed or (self._raw_seq != done and self._clients > 0))
+                if self.closed:
+                    return
+                frame, done = self._raw, self._raw_seq
+            self.publish(self._encode(frame))
 
     def publish(self, jpeg: bytes) -> None:
         with self._cond:

@@ -29,6 +29,8 @@ class Camera(Protocol):
 
     def set_exposure_limit(self, max_us: int) -> None: ...
 
+    def set_zoom(self, factor: float) -> None: ...
+
     def start_recording(self, path: Path) -> None: ...
 
     def stop_recording(self) -> None: ...
@@ -39,7 +41,7 @@ class Camera(Protocol):
 class PiCamera:
     """树莓派相机（IMX462 等），用 picamera2。"""
 
-    def __init__(self, size: tuple[int, int] = (1280, 720)):
+    def __init__(self, size: tuple[int, int] = (1024, 576)):
         from picamera2 import Picamera2  # 只在树莓派上有
 
         self.size = size
@@ -63,6 +65,13 @@ class PiCamera:
     def set_exposure_limit(self, max_us: int) -> None:
         # 自动曝光的最长曝光受帧间隔限制：帧间隔就是手持防抖要的最长曝光
         self.cam.set_controls({"FrameDurationLimits": (max_us, max_us)})
+
+    def set_zoom(self, factor: float) -> None:
+        """让 ISP 只取传感器中间 1/factor 的区域再缩放输出：变倍不占 CPU，
+        传感器像素比输出多的部分（IMX462 1920 宽 → 输出 1024 宽，约 1.9×）不损失清晰度。"""
+        x, y, w, h = self.cam.camera_properties["ScalerCropMaximum"]
+        cw, ch = int(w / factor), int(h / factor)
+        self.cam.set_controls({"ScalerCrop": (x + (w - cw) // 2, y + (h - ch) // 2, cw, ch)})
 
     def start_recording(self, path: Path) -> None:
         from picamera2.encoders import H264Encoder
@@ -91,13 +100,15 @@ class SimulatedCamera:
 
     TARGET = 0.4  # 自动曝光想把平均亮度调到这里
     MAX_GAIN = 64.0
+    SENSITIVITY = 1000.0  # 白天（ambient = 1）约 1/1000 秒曝光
 
-    def __init__(self, size: tuple[int, int] = (640, 360), ambient: float = 1.0, seed: int = 0):
+    def __init__(self, size: tuple[int, int] = (1024, 576), ambient: float = 1.0, seed: int = 0):
         self.size = size
         self.ambient = ambient
         self.ir_power = 0.0
         self.ircut_engaged = True
         self.max_exposure_us = 33_333
+        self.zoom = 1.0
         self.recording_path: Path | None = None
         self._rng = np.random.default_rng(seed)
         self._t = 0
@@ -129,18 +140,22 @@ class SimulatedCamera:
         reflect = self._frame_reflectance()
         light = self.ambient
         if not self.ircut_engaged:
-            light += 0.02 * self.ir_power  # 红外灯在近处的照度，和月光差不多到十倍
-        signal = reflect * light  # 每秒、单位增益下传感器收到的“亮度”
+            light += 0.01 * self.ir_power  # 红外灯满功率时，比有月光的夜里亮约五倍
+        signal = reflect * light * self.SENSITIVITY  # 每秒、单位增益下传感器收到的“亮度”
         # 自动曝光：先加长曝光（不超过手持防抖的上限），不够再加增益
         needed = self.TARGET / (float(signal.mean()) + 1e-9)
         exposure_s = min(needed, self.max_exposure_us * 1e-6)
         gain = float(np.clip(needed / exposure_s, 1.0, self.MAX_GAIN))
         img = signal * exposure_s * gain
         # 增益越高噪点越多
-        img = img + self._rng.normal(0.0, 0.004 * math.sqrt(gain), img.shape).astype(np.float32)
+        img = img + self._rng.normal(0.0, 0.01 * math.sqrt(gain), img.shape).astype(np.float32)
         if not self.ircut_engaged:  # 红外光让颜色偏粉
             img = img * np.array([1.15, 0.9, 1.0], dtype=np.float32)
         frame = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+        if self.zoom > 1:
+            from .imaging import digital_zoom
+
+            frame = digital_zoom(frame, self.zoom)
         if self.recording_path is not None:
             with open(self.recording_path, "ab") as f:
                 f.write(encode_jpeg(frame, 60))
@@ -148,6 +163,9 @@ class SimulatedCamera:
 
     def set_exposure_limit(self, max_us: int) -> None:
         self.max_exposure_us = max_us
+
+    def set_zoom(self, factor: float) -> None:
+        self.zoom = factor
 
     def start_recording(self, path: Path) -> None:
         self.recording_path = path.with_suffix(".mjpeg")
@@ -177,7 +195,7 @@ class IO(Protocol):
 
 # 默认接线（BCM 编号），见 docs/NIGHTVISION.md
 DEFAULT_PINS = {
-    "ir_pwm": 18,  # 红外灯恒流驱动板的 PWM / DIM 脚（硬件 PWM）
+    "ir_pwm": 18,  # 红外灯恒流驱动板的 PWM / 调光脚
     "ircut": 23,  # 红外截止滤镜控制脚：高电平 = 滤镜放进去（白天）
     "buttons": {"ir": 5, "zoom": 6, "mode": 13, "shutter": 19, "power": 26},
 }
@@ -289,16 +307,24 @@ class NullDisplay:
         pass
 
 
-def letterbox(frame: np.ndarray, width: int, height: int) -> np.ndarray:
-    """等比例缩放到屏幕里，上下或左右留黑边。"""
+def letterbox(frame: np.ndarray, width: int, height: int, out: np.ndarray | None = None) -> np.ndarray:
+    """等比例缩放到屏幕里，上下或左右留黑边。
+
+    画面宽度正好等于屏幕宽度时（默认 1024×576 → 1024×768）不缩放，直接放到中间。
+    传入 out 可以复用同一块内存。
+    """
     h, w = frame.shape[:2]
     scale = min(width / w, height / h)
     nw, nh = max(1, round(w * scale)), max(1, round(h * scale))
-    xs = ((np.arange(nw) + 0.5) / scale).astype(np.intp).clip(0, w - 1)
-    ys = ((np.arange(nh) + 0.5) / scale).astype(np.intp).clip(0, h - 1)
-    out = np.zeros((height, width, 3), dtype=np.uint8)
+    if out is None:
+        out = np.zeros((height, width, 3), dtype=np.uint8)
     x0, y0 = (width - nw) // 2, (height - nh) // 2
-    out[y0:y0 + nh, x0:x0 + nw] = frame[ys[:, None], xs[None, :]]
+    if (nw, nh) == (w, h):
+        out[y0:y0 + nh, x0:x0 + nw] = frame
+    else:
+        xs = ((np.arange(nw) + 0.5) / scale).astype(np.intp).clip(0, w - 1)
+        ys = ((np.arange(nh) + 0.5) / scale).astype(np.intp).clip(0, h - 1)
+        out[y0:y0 + nh, x0:x0 + nw] = frame[ys[:, None], xs[None, :]]
     return out
 
 
@@ -330,9 +356,10 @@ class FramebufferDisplay:
         if self.bpp not in (16, 32):
             raise ValueError(f"不支持 {self.bpp} 位帧缓冲")
         self._fd = os.open(device, os.O_RDWR)
+        self._canvas = np.zeros((self.height, self.width, 3), dtype=np.uint8)  # 黑边只清一次
 
     def show(self, frame: np.ndarray) -> None:
-        img = letterbox(frame, self.width, self.height)
+        img = letterbox(frame, self.width, self.height, self._canvas)
         data = to_rgb565(img) if self.bpp == 16 else to_bgrx(img)
         row = self.width * self.bpp // 8
         if row == self.stride:

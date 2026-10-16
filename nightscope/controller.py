@@ -60,6 +60,13 @@ class SetIR:
 
 
 @dataclass(frozen=True)
+class SetZoom:
+    """数码变倍：真机上由相机的图像处理器裁剪，不占 CPU。"""
+
+    factor: int
+
+
+@dataclass(frozen=True)
 class SetExposureLimit:
     max_us: int
 
@@ -84,7 +91,7 @@ class Shutdown:
     pass
 
 
-Command = SetIRCut | SetIR | SetExposureLimit | TakePhoto | StartRecording | StopRecording | Shutdown
+Command = SetIRCut | SetIR | SetZoom | SetExposureLimit | TakePhoto | StartRecording | StopRecording | Shutdown
 
 
 # ------------------------------------------------------------------ 控制器
@@ -101,7 +108,7 @@ class Controller:
 
     def startup(self) -> list[Command]:
         """开机时把硬件设到和状态一致。"""
-        return self._apply_mode() + [SetExposureLimit(MAX_EXPOSURE_US[self.state.zoom])]
+        return self._apply_mode() + self._apply_zoom()
 
     # -------------------------------------------------------------- 按键
 
@@ -127,7 +134,7 @@ class Controller:
         if button == "zoom":
             s.zoom = 1 if long else ZOOMS[(ZOOMS.index(s.zoom) + 1) % len(ZOOMS)]
             s.message = f"{s.zoom}× 变倍"
-            return [SetExposureLimit(MAX_EXPOSURE_US[s.zoom])]
+            return self._apply_zoom()
         if button == "mode":
             if long:
                 if s.mode == NIGHT:
@@ -199,6 +206,9 @@ class Controller:
         else:
             self._bright_since = None
         return []
+
+    def _apply_zoom(self) -> list[Command]:
+        return [SetZoom(self.state.zoom), SetExposureLimit(MAX_EXPOSURE_US[self.state.zoom])]
 
     def _apply_mode(self) -> list[Command]:
         s = self.state

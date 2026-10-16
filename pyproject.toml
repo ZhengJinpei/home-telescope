@@ -1,24 +1,26 @@
 [project]
 name = "home-telescope"
-version = "0.3.0"
-description = "家庭智能望远镜：光学计算、今晚星空、自动寻星"
+version = "0.4.0"
+description = "家用夜视望远镜和家庭天文望远镜：夜视、光学计算、今晚星空、自动寻星"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = []  # 天文部分只用标准库；夜视部分要 numpy 和 pillow，见 nightscope 可选依赖
 
 [project.optional-dependencies]
 pi = ["gpiozero>=2.0"]
-dev = ["pytest>=8"]
+nightscope = ["numpy>=1.24", "pillow>=9"]
+dev = ["pytest>=8", "numpy>=1.24", "pillow>=9"]
 
 [project.scripts]
 telescope = "telescope.cli:main"
+nightscope = "nightscope.__main__:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["telescope"]
+packages = ["telescope", "nightscope"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
