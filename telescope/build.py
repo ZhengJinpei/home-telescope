@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .optics import PI_HQ_CAMERA, Camera, Telescope
+from .optics import PI_HQ_CAMERA, Camera, Telescope, cone_overlap
 
 GLASS_DENSITY_KG_MM3 = 2.5e-6  # 普通光学玻璃 / 硼硅玻璃约 2.2–2.5 g/cm³
 # 淘宝上常见的副镜短轴尺寸（mm）
@@ -88,19 +88,6 @@ class NewtonianDesign:
         return min(self.balance_pos, self.balance_camera_pos), max(self.balance_pos, self.balance_camera_pos)
 
 
-def _overlap_fraction(r_cone: float, r_sec: float, offset: float) -> float:
-    """离轴光锥（半径 r_cone，偏心 offset）落在副镜（半径 r_sec）上的比例：两圆相交面积 / 光锥面积。"""
-    if offset >= r_cone + r_sec:
-        return 0.0
-    if offset <= abs(r_sec - r_cone):
-        return 1.0 if r_sec >= r_cone else (r_sec / r_cone) ** 2
-    a = r_cone ** 2 * math.acos((offset ** 2 + r_cone ** 2 - r_sec ** 2) / (2 * offset * r_cone))
-    b = r_sec ** 2 * math.acos((offset ** 2 + r_sec ** 2 - r_cone ** 2) / (2 * offset * r_sec))
-    c = 0.5 * math.sqrt((-offset + r_cone + r_sec) * (offset + r_cone - r_sec)
-                        * (offset - r_cone + r_sec) * (offset + r_cone + r_sec))
-    return (a + b - c) / (math.pi * r_cone ** 2)
-
-
 def design_newtonian(spec: NewtonianSpec = NewtonianSpec()) -> NewtonianDesign:
     warnings = []
     d, fl, travel = spec.aperture_mm, spec.focal_length_mm, spec.focuser_travel_mm
@@ -131,7 +118,7 @@ def design_newtonian(spec: NewtonianSpec = NewtonianSpec()) -> NewtonianDesign:
         return (minor * fl - d * sec_to_focus) / (fl - sec_to_focus)
 
     def corner_lit(minor: float) -> float:
-        return _overlap_fraction(d / 2 * sec_to_focus / fl, minor / 2, corner * (1 - sec_to_focus / fl))
+        return cone_overlap(d / 2 * sec_to_focus / fl, minor / 2, corner * (1 - sec_to_focus / fl))
 
     # 经典公式：短轴 = 全亮视场 + (口径 - 全亮视场) × 副镜到焦点距离 / 焦距
     field_mm = spec.illuminated_field_mm or MIN_FULL_FIELD_MM

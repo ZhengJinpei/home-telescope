@@ -150,3 +150,19 @@ def camera_view(scope: Telescope, camera: Camera) -> CameraView:
     else:
         sampling = "采样合适"
     return CameraView(scale, w, h, sampling)
+
+
+def cone_overlap(r_cone: float, r_hole: float, offset: float) -> float:
+    """光锥（半径 r_cone，偏心 offset）有多少能穿过半径 r_hole 的圆孔：两圆相交面积 / 光锥面积。
+
+    用来算渐晕：副镜、棱镜、调焦座这些圆孔挡掉了视场边缘多少光。
+    """
+    if offset >= r_cone + r_hole:
+        return 0.0
+    if offset <= abs(r_hole - r_cone):
+        return 1.0 if r_hole >= r_cone else (r_hole / r_cone) ** 2
+    a = r_cone ** 2 * math.acos((offset ** 2 + r_cone ** 2 - r_hole ** 2) / (2 * offset * r_cone))
+    b = r_hole ** 2 * math.acos((offset ** 2 + r_hole ** 2 - r_cone ** 2) / (2 * offset * r_hole))
+    c = 0.5 * math.sqrt((-offset + r_cone + r_hole) * (offset + r_cone - r_hole)
+                        * (offset - r_cone + r_hole) * (offset + r_cone + r_hole))
+    return (a + b - c) / (math.pi * r_cone ** 2)

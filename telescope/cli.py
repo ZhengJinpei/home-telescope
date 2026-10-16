@@ -8,7 +8,7 @@ from datetime import date, datetime
 
 from pathlib import Path
 
-from . import astro, build, mirror, optics
+from . import astro, build, mirror, optics, spotting, stl
 from .events import Event, find_events, highlights
 from .catalog import ALL_TARGETS, find
 from .mount import AltAzMount, SimulatedDriver, UnsafeTarget
@@ -180,6 +180,57 @@ def cmd_mirror(args) -> None:
     print("  镀膜和主镜一样；边缘倒角，背面细磨")
 
 
+def cmd_spotting(args) -> None:
+    path, clear, to_focus = spotting.PRISMS[args.prism]
+    spec = spotting.SpottingSpec(
+        aperture_mm=args.aperture, focal_length_mm=args.focal, ed_glass=not args.achromat,
+        tube_od_mm=args.tube_od, tube_wall_mm=args.tube_wall, focuser_length_mm=args.focuser_length,
+        focuser_travel_mm=args.focuser_travel, prism_path_mm=path, prism_clear_mm=clear, prism_to_focus_mm=to_focus,
+    )
+    dsn = spotting.design_spotting(spec)
+    d, f = spec.aperture_mm, spec.focal_length_mm
+    print(f"观鸟镜：物镜 {d:g} mm，焦距 {f:g} mm（F/{f / d:g}），{args.prism} 寸 45° 正像棱镜")
+
+    print("\n目镜（1.25 寸）  倍率  出瞳    视场   100 m 外宽  黄昏系数  傍晚亮度（成人/孩子）")
+    for r in dsn.rows:
+        edge = "" if r.edge_light >= 0.95 else f"  视场边缘亮度 {r.edge_light:.0%}"
+        print(f"  {r.eyepiece.name:<18}{r.magnification:4.0f}×  {r.exit_pupil_mm:3.1f} mm  {r.true_fov_deg:4.1f}°"
+              f"  {r.width_at_100m:5.1f} m   {r.twilight_factor:5.1f}    {r.brightness_adult:4.0%} / {r.brightness_child:4.0%}{edge}")
+        for n in r.notes:
+            print(f"      · {n}")
+    print("  傍晚亮度：看同一处景物，和肉眼直接看比有多亮。望远镜不会比肉眼更亮，")
+    print("  但能把东西放大，傍晚肉眼只看到一团影子的动物，在望远镜里能认出是什么")
+
+    print(f"\n对焦：最近能看清 {dsn.min_focus_m:.1f} m 外（调焦行程 {spec.focuser_travel_mm:g} mm）；"
+          f"看 10 m 外要比看远处多拉出 {spotting.focus_extension_mm(f, 10):.0f} mm")
+    print(f"色差：{dsn.color_note}")
+
+    print("\n镜筒（位置都从镜筒前端量起）")
+    print(f"  6061 铝管：外径 {spec.tube_od_mm:g} mm，壁厚 {spec.tube_wall_mm:g} mm，切成 {dsn.tube_length_mm:.0f} mm 长")
+    print(f"  遮光罩长 {dsn.dew_shield_mm:.0f} mm；遮光环：" + "，".join(
+        f"{b.position_mm:.0f} mm 处孔径 {b.hole_mm:.0f} mm" for b in dsn.baffles))
+    print(f"  三脚架抱箍中心：离镜筒前端约 {dsn.balance_from_cell_mm:.0f} mm（装上目镜后再微调）；总重约 {dsn.total_kg:.1f} kg")
+    for w in dsn.warnings:
+        print(f"  ⚠ {w}")
+
+    print("\n物镜外协要求")
+    for k, v in spotting.ObjectiveSpec(d, f, spec.ed_glass).lines:
+        print(f"  {k}：{v}")
+
+    parts = spotting.printed_parts(dsn)
+    print("\n3D 打印零件（黑色 PETG）")
+    for part in parts:
+        print(f"  {part.name}：{part.note}")
+    if args.out:
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        for part in parts:
+            stl.write_stl(stl.revolve(part.profile), out / part.filename, part.filename)
+        print(f"\nSTL 文件已保存到 {out}/，可以直接发给 3D 打印店")
+    else:
+        print("\n加上 --out 文件夹 可以生成 STL 文件")
+
+
 def cmd_tonight(args) -> None:
     obs = _observer(args)
     night = date.fromisoformat(args.date) if args.date else datetime.now(obs.tz).date()
@@ -319,6 +370,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--focal", type=float, default=1200, help="主镜焦距 mm，默认 1200")
     sp.add_argument("--thickness", type=float, default=25, help="主镜厚度 mm，默认 25")
     sp.set_defaults(func=cmd_mirror)
+
+    sp = sub.add_parser("spotting", help="观鸟镜：目镜倍率、镜筒尺寸、物镜外协要求、3D 打印零件")
+    sp.add_argument("--aperture", type=float, default=80, help="物镜口径 mm，默认 80")
+    sp.add_argument("--focal", type=float, default=480, help="物镜焦距 mm，默认 480")
+    sp.add_argument("--achromat", action="store_true", help="用普通消色差物镜（默认 ED 低色散）")
+    sp.add_argument("--prism", choices=list(spotting.PRISMS), default="2", help="正像棱镜尺寸：2 寸（默认）或 1.25 寸")
+    sp.add_argument("--tube-od", type=float, default=90, help="镜筒外径 mm，默认 90")
+    sp.add_argument("--tube-wall", type=float, default=2, help="镜筒壁厚 mm，默认 2")
+    sp.add_argument("--focuser-length", type=float, default=70, help="调焦座收到底时的长度 mm，默认 70")
+    sp.add_argument("--focuser-travel", type=float, default=50, help="调焦行程 mm，默认 50")
+    sp.add_argument("--out", help="把 3D 打印零件的 STL 文件保存到这个文件夹")
+    sp.set_defaults(func=cmd_spotting)
 
     sp = sub.add_parser("tonight", help="今晚看什么")
     add_place(sp)

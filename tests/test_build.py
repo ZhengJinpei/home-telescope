@@ -182,11 +182,13 @@ def test_dslr_design():
     assert dob.pivot_height - math.hypot(n.balance_camera_pos, spec.tube_od_mm / 2) >= 25
 
 
-def test_overlap_fraction():
-    assert build._overlap_fraction(5, 10, 0) == 1.0
-    assert build._overlap_fraction(5, 10, 20) == 0.0
-    assert build._overlap_fraction(5, 5, 0) == pytest.approx(1.0)
-    half = build._overlap_fraction(5, 1000, 1000)  # 大圆边缘近似直线：一半在里面
+def test_cone_overlap():
+    from telescope.optics import cone_overlap
+
+    assert cone_overlap(5, 10, 0) == 1.0
+    assert cone_overlap(5, 10, 20) == 0.0
+    assert cone_overlap(5, 5, 0) == pytest.approx(1.0)
+    half = cone_overlap(5, 1000, 1000)  # 大圆边缘近似直线：一半在里面
     assert half == pytest.approx(0.5, abs=0.01)
 
 
