@@ -22,7 +22,7 @@ EXTENSION_TUBES = (25, 35, 50, 75)
 # 焦点相对调焦座抽筒顶端的位置（mm，往外为正）
 EYEPIECE_FOCUS = (-10.0, 5.0)  # 大多数 1.25 寸目镜的焦面在镜身台阶附近
 EYEPIECE_KG = 0.3
-CAMERA_MARGIN_MM = 5.0  # 相机对焦时抽筒至少伸出这么多，别顶到底
+CAMERA_MARGIN_MM = 2.0  # 相机对焦时抽筒至少伸出这么多，别顶到底
 MIN_FULL_FIELD_MM = 10.0  # 目视：中心这么大的范围要 100% 亮
 MIN_CORNER_LIGHT = 0.8  # 拍照：四角至少 80% 亮，剩下的暗角拍平场就能修正
 WAVELENGTH_MM = 0.00055

@@ -8,7 +8,7 @@ from datetime import date, datetime
 
 from pathlib import Path
 
-from . import astro, build, optics
+from . import astro, build, mirror, optics
 from .events import Event, find_events, highlights
 from .catalog import ALL_TARGETS, find
 from .mount import AltAzMount, SimulatedDriver, UnsafeTarget
@@ -137,6 +137,47 @@ def cmd_build(args) -> None:
         print(f"\n图纸已保存：{out / stem}.dxf（发给 CNC 切割店）和 .svg（用浏览器打开预览）")
     else:
         print("\n加上 --out 文件夹 可以生成切割图纸")
+
+
+def cmd_mirror(args) -> None:
+    p = mirror.PrimarySpec(args.aperture, args.focal, args.thickness)
+    n = build.design_newtonian(build.NewtonianSpec(
+        aperture_mm=args.aperture, focal_length_mm=args.focal, mirror_thickness_mm=args.thickness))
+    sec = mirror.SecondarySpec(n.secondary_minor_axis)
+    lam = mirror.TEST_WAVELENGTH_NM
+
+    print(f"主镜（{p.diameter_mm:g} mm f/{p.focal_ratio:g} 抛物面反射镜）")
+    print(f"  直径 {p.diameter_mm:g} mm（-0/-0.2），有效口径 ≥ {p.clear_aperture_mm:g} mm")
+    print(f"  厚度 {p.thickness_mm:g} mm（径厚比约 1:{p.diameter_mm / p.thickness_mm:.0f}），重约 {p.mass_kg:.1f} kg")
+    print(f"  焦距 {p.focal_length_mm:g} mm ±1%，曲率半径 R = {p.radius_of_curvature_mm:g} mm，请附实测焦距")
+    print(f"  面形：抛物面（圆锥系数 K = -1），镜面中心凹深 {p.sagitta_mm:.3f} mm")
+    print(f"    从最接近的球面修成抛物面，只需改动约 {p.parabolizing_nm:.0f} nm")
+    print(f"  精度（{lam:g} nm）：波面 PV ≤ λ/8（合格线 λ/6），RMS ≤ λ/25，斯特列尔比 ≥ 0.9")
+    print(f"    即面形 PV ≤ λ/16。请附干涉检测报告；没有干涉仪可以附傅科检验读数")
+    print("  材料：硼硅玻璃或微晶玻璃（热胀冷缩小）；K9 也能用，出门后要多等一会儿")
+    print("  背面细磨平整，侧面细磨，两面边缘倒角 0.5–1 mm × 45°")
+    print("  镀膜：增强铝膜（可见光平均反射率 ≥ 94%）+ 二氧化硅保护层")
+    print("  中心做一个小标记（直径 5 mm 以内的圆点或圆环），校准光轴用")
+
+    pv, rms, strehl = mirror.sphere_error(p.diameter_mm, p.focal_length_mm)
+    if strehl < 0.7:
+        verdict = "，星点明显发糊，必须修抛物面"
+    elif strehl < 0.8:
+        verdict = "，差一点到衍射极限（0.8），建议修抛物面"
+    else:
+        verdict = "，已经达到衍射极限，球面就够用"
+    print(f"\n如果只能做球面：这块镜子做成球面，波面误差 PV {pv:.2f}λ，斯特列尔比 {strehl:.2f}{verdict}")
+    f_min = mirror.min_focal_ratio_for_sphere(p.diameter_mm)
+    print(f"  {p.diameter_mm:g} mm 的球面镜要到 f/{f_min:g}（焦距 {f_min * p.diameter_mm:.0f} mm）以上才达到衍射极限")
+
+    print(f"\n傅科检验读数（在球心检验，光源随刀口移动，等面积分 4 个带区）")
+    for z in mirror.foucault_zones(p.diameter_mm, p.focal_length_mm):
+        print(f"  {z.inner_mm:5.1f}–{z.outer_mm:5.1f} mm 带区：刀口比中心后退 {z.reading_mm:.3f} mm")
+
+    print(f"\n副镜（椭圆平面镜，45° 放置）")
+    print(f"  短轴 {sec.minor_axis_mm:g} mm，长轴 {sec.major_axis_mm:.1f} mm，厚度 ≥ {sec.thickness_mm:g} mm")
+    print(f"  平面度：面形 PV ≤ λ/10（{lam:g} nm）")
+    print("  镀膜和主镜一样；边缘倒角，背面细磨")
 
 
 def cmd_tonight(args) -> None:
@@ -272,6 +313,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="按哪台相机设计焦点和副镜：hq（树莓派 HQ，默认）或 80d（佳能 80D 单反）")
     sp.add_argument("--out", help="把切割图纸（DXF + SVG）保存到这个文件夹")
     sp.set_defaults(func=cmd_build)
+
+    sp = sub.add_parser("mirror", help="主镜和副镜的外协加工参数")
+    sp.add_argument("--aperture", type=float, default=150, help="主镜口径 mm，默认 150")
+    sp.add_argument("--focal", type=float, default=1200, help="主镜焦距 mm，默认 1200")
+    sp.add_argument("--thickness", type=float, default=25, help="主镜厚度 mm，默认 25")
+    sp.set_defaults(func=cmd_mirror)
 
     sp = sub.add_parser("tonight", help="今晚看什么")
     add_place(sp)
